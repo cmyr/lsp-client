@@ -1,0 +1,6 @@
+[package]
+name = "lsp-client"
+version = "0.1.0"
+authors = ["Colin Rofls <colin@cmyr.net>"]
+
+[dependencies]
