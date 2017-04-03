@@ -20,6 +20,7 @@ macro_rules! print_err {
 }
 
 #[derive(Debug)]
+/// An Error type encapsulating the various failure possibilites of the parsing process.
 enum ParseError {
     Io(io::Error),
     ParseInt(std::num::ParseIntError),
