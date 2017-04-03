@@ -1,3 +1,8 @@
+#[macro_use]
+extern crate serde_json;
+
+mod parsing;
+
 use std::sync::{Mutex, Arc};
 use std::thread;
 use std::process::{Command, Stdio, ChildStdin, Child};
@@ -10,8 +15,8 @@ struct LanguageServer {
 
 impl LanguageServer {
     fn send(&mut self, msg: &str) {
-        self.child_stdin.write_all(msg.as_bytes());
-        self.child_stdin.write_all("\n".as_bytes());
+        self.child_stdin.write_all(msg.as_bytes()).expect("error writing to stdin");
+        self.child_stdin.write_all("\n".as_bytes()).expect("error writing to stdin");
     }
 }
 
@@ -62,7 +67,7 @@ fn run(mut child: Child) -> LanguageServerRef {
 fn main() {
     println!("starting main read loop");
     let lang_server = run(prepare_command());
-    let mut reader = BufReader::new(stdin());
+    let reader = BufReader::new(stdin());
     for input in reader.lines() {
         match input {
             Ok(ref text) if text == "q" => break,
