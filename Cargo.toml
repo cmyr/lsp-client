@@ -5,3 +5,4 @@ authors = ["Colin Rofls <colin@cmyr.net>"]
 
 [dependencies]
 serde_json = "0.9"
+jsonrpc-lite = "0.3.0"

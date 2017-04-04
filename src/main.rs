@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate serde_json;
+extern crate jsonrpc_lite;
 
+#[macro_use]
 mod parsing;
 
 use std::sync::{Mutex, Arc};
@@ -9,17 +11,18 @@ use std::process::{Command, Stdio, ChildStdin, Child};
 use std::io::{Write, BufReader, BufRead, stdin};
 use std::collections::HashMap;
 
-use serde_json::value::Value;
+use serde_json::value::{Value, Map};
+use jsonrpc_lite::{JsonRPC, Id};
 
 // this to get around some type system pain related to callbacks. See:
 // https://doc.rust-lang.org/beta/book/trait-objects.html,
 // http://stackoverflow.com/questions/41081240/idiomatic-callbacks-in-rust
 trait Callable: Send {
-    fn call(self: Box<Self>, result: Result<Value, String>);
+    fn call(self: Box<Self>, result: Result<Value, Value>);
 }
 
-impl<F:Send + FnOnce(Result<Value, String>)> Callable for F {
-    fn call(self: Box<F>, result: Result<Value, String>) {
+impl<F:Send + FnOnce(Result<Value, Value>)> Callable for F {
+    fn call(self: Box<F>, result: Result<Value, Value>) {
         (*self)(result)
     }
 }
@@ -33,7 +36,7 @@ type Callback = Box<Callable>;
 struct LanguageServer<W: Write> {
     peer: W,
     pending: HashMap<usize, Callback>,
-    _id: usize,
+    next_id: usize,
 }
 
 
@@ -52,13 +55,13 @@ impl <W:Write> LanguageServer<W> {
     fn send_request(&mut self, method: &str, params: &Value, completion: Callback) {
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self._id,
+            "id": self.next_id,
             "method": method,
             "params": params
         });
 
-        self.pending.insert(self._id, completion);
-        self._id += 1;
+        self.pending.insert(self.next_id, completion);
+        self.next_id += 1;
         self.send_rpc(&request);
     }
 
@@ -69,6 +72,16 @@ impl <W:Write> LanguageServer<W> {
             "params": params
         });
         self.send_rpc(&notification);
+    }
+
+    fn handle_response(&mut self, id: usize, result: Value) {
+        let callback = self.pending.remove(&id).expect(&format!("id {} missing from request table", id));
+        callback.call(Ok(result));
+    }
+
+    fn handle_error(&mut self, id: usize, error: Value) {
+        let callback = self.pending.remove(&id).expect(&format!("id {} missing from request table", id));
+        callback.call(Err(error));
     }
 
     fn send_rpc(&mut self, rpc: &Value) {
@@ -83,12 +96,24 @@ impl <W:Write> LanguageServer<W> {
 /// Access control and convenience wrapper around a shared LanguageServer instance.
 struct LanguageServerRef<W: Write>(Arc<Mutex<LanguageServer<W>>>);
 
+//FIXME: this is hacky, and prevents good error propogation,
+fn number_from_id(id: Option<&Value>) -> usize {
+    let id = id.expect("response missing id field");
+    let id = match id {
+        &Value::Number(ref n) => n.as_u64().expect("failed to take id as u64"),
+        &Value::String(ref s) => u64::from_str_radix(s, 10).expect("failed to convert string id to u64"),
+        other => panic!("unexpected value for id field: {:?}", other),
+    };
+
+    id as usize
+}
+
 impl<W: Write> LanguageServerRef<W> {
     fn new(peer: W) -> Self {
         LanguageServerRef(Arc::new(Mutex::new(LanguageServer {
             peer: peer,
             pending: HashMap::new(),
-            _id: 1,
+            next_id: 1,
         })))
     }
 
@@ -99,15 +124,34 @@ impl<W: Write> LanguageServerRef<W> {
         inner.write(msg);
     }
 
-    //TODO: actually parse and handle responses / notifications
-    fn handle_msg(&self, msg: &str) {
-        println!("server_ref handled '{}'", msg);
+    //TODO: real logging (with slog?)
+    fn handle_msg(&self, val: &Value) {
+        match JsonRPC::parse_object(val) {
+            JsonRPC::Request(obj) => print_err!("client received unexpected request: {:?}", obj),
+            JsonRPC::Notification(obj) => println!("recv notification: {:?}", obj),
+            JsonRPC::Success(ref mut obj) => {
+                let mut inner = self.0.lock().unwrap();
+                let mut obj = obj.as_object_mut().unwrap();
+                let id = number_from_id(obj.get("id"));
+                inner.handle_response(id, obj.remove("result").expect("response missing 'result' field"));
+            },
+            JsonRPC::Error(ref mut obj) => {
+                if obj.get("id").expect("error missing id field").is_null() {
+                    let mut inner = self.0.lock().unwrap();
+                    let mut obj = obj.as_object_mut().unwrap();
+                    inner.handle_error(number_from_id(obj.get("id")), obj.remove("error").unwrap());
+                } else {
+                    print_err!("received error: {:?}", obj);
+                }
+            },
+            JsonRPC::ErrorRequst(err) => print_err!("JSON-RPC error {:?}", err),
+        };
     }
 
     /// Sends a JSON-RPC request message with the provided method and parameters.
     /// `completion` should be a callback which will be executed with the server's response.
     fn send_request<CB>(&self, method: &str, params: &Value, completion: CB)
-        where CB: 'static + Send + FnOnce(Result<Value, String>) {
+        where CB: 'static + Send + FnOnce(Result<Value, Value>) {
             let mut inner = self.0.lock().unwrap();
             inner.send_request(method, params, Box::new(completion));
     }
@@ -135,7 +179,7 @@ fn run(mut child: Child) -> (Child, LanguageServerRef<ChildStdin>) {
             let mut reader = BufReader::new(child_stdout);
             loop {
                 match parsing::read_message(&mut reader) {
-                    Ok(ref val) => println!("{:?}", serde_json::to_string(val)),
+                    Ok(ref val) => lang_server.handle_msg(val),
                     Err(err) => println!("parse error: {:?}", err),
                 };
             }

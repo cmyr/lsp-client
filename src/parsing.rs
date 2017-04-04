@@ -1,7 +1,7 @@
 //! Handles parsing of Language Server Protocol messages from a stream.
 
 use std;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead};
 
 use serde_json;
 use serde_json::value::Value;
@@ -112,6 +112,7 @@ fn parse_header(s: &str) -> Result<LspHeader, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufReader;
     
     #[test]
     fn test_parse_header() {
