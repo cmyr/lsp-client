@@ -30,8 +30,8 @@ type Callback = Box<Callable>;
 ///
 /// LanguageServer should only ever be instantiated or accessed through an instance of
 /// LanguageServerRef, which mediates access to a single shared LanguageServer through a Mutex.
-struct LanguageServer {
-    child_stdin: ChildStdin,
+struct LanguageServer<W: Write> {
+    peer: W,
     pending: HashMap<usize, Callback>,
     _id: usize,
 }
@@ -40,14 +40,13 @@ struct LanguageServer {
 /// Generates a Language Server Protocol compliant message.
 fn prepare_lsp_json(msg: &Value) -> Result<String, serde_json::error::Error> {
     let request = serde_json::to_string(&msg)?;
-    Ok(format!("Content-Length: {}\n\r\n\r{}", request.len(), request))
+    Ok(format!("Content-Length: {}\r\n\r\n{}", request.len(), request))
 }
 
-impl LanguageServer {
+impl <W:Write> LanguageServer<W> {
     fn write(&mut self, msg: &str) {
-        self.child_stdin.write_all(msg.as_bytes()).expect("error writing to stdin");
-        self.child_stdin.write_all("\n".as_bytes()).expect("error writing to stdin");
-        self.child_stdin.flush().expect("error flushing child stdin");
+        self.peer.write_all(msg.as_bytes()).expect("error writing to stdin");
+        self.peer.flush().expect("error flushing child stdin");
     }
 
     fn send_request(&mut self, method: &str, params: &Value, completion: Callback) {
@@ -82,12 +81,12 @@ impl LanguageServer {
 }
 
 /// Access control and convenience wrapper around a shared LanguageServer instance.
-struct LanguageServerRef(Arc<Mutex<LanguageServer>>);
+struct LanguageServerRef<W: Write>(Arc<Mutex<LanguageServer<W>>>);
 
-impl LanguageServerRef {
-    fn new(child_stdin: ChildStdin) -> Self {
+impl<W: Write> LanguageServerRef<W> {
+    fn new(peer: W) -> Self {
         LanguageServerRef(Arc::new(Mutex::new(LanguageServer {
-            child_stdin: child_stdin,
+            peer: peer,
             pending: HashMap::new(),
             _id: 1,
         })))
@@ -100,6 +99,7 @@ impl LanguageServerRef {
         inner.write(msg);
     }
 
+    //TODO: actually parse and handle responses / notifications
     fn handle_msg(&self, msg: &str) {
         println!("server_ref handled '{}'", msg);
     }
@@ -119,49 +119,61 @@ impl LanguageServerRef {
     }
 }
 
-impl Clone for LanguageServerRef {
+impl <W: Write> Clone for LanguageServerRef<W> {
     fn clone(&self) -> Self {
         LanguageServerRef(self.0.clone())
     }
 }
 
-fn run(mut child: Child) -> LanguageServerRef {
+fn run(mut child: Child) -> (Child, LanguageServerRef<ChildStdin>) {
     let child_stdin = child.stdin.take().unwrap();
     let child_stdout = child.stdout.take().unwrap();
     let lang_server = LanguageServerRef::new(child_stdin);
     {
         let lang_server = lang_server.clone();
         thread::spawn(move ||{
-            let reader = BufReader::new(child_stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => lang_server.handle_msg(&line),
-                    Err(e) => panic!("error in read loop: {:?}", e),
-                }
+            let mut reader = BufReader::new(child_stdout);
+            loop {
+                match parsing::read_message(&mut reader) {
+                    Ok(ref val) => println!("{:?}", serde_json::to_string(val)),
+                    Err(err) => println!("parse error: {:?}", err),
+                };
             }
         });
     }
-    lang_server
+    (child, lang_server)
 }
 
 fn main() {
     println!("starting main read loop");
-    let lang_server = run(prepare_command());
-    let reader = BufReader::new(stdin());
-    for input in reader.lines() {
-        match input {
-            Ok(ref text) if text == "q" => break,
-            Ok(text) => lang_server.write(&text),
-            Err(_) => break,
-        }
-    } 
+    let (mut child, lang_server) = run(prepare_command());
+    let init = json!({
+        "process_id": "Null",
+        "root_path": "/Users/cmyr/Dev/hacking/xi-mac/xi-editor",
+        "initialization_options": {},
+        "capabilities": {
+            "documentSelector": ["rust"],
+            "synchronize": {
+                "configurationSection": "languageServerExample"
+            }
+        },
+    });
+
+    lang_server.send_request("initialize", &init, |result| {
+        println!("received response {:?}", result);
+    });
+    child.wait();
 }
 
 
 fn prepare_command() -> Child {
-	Command::new("/bin/cat")
-		.stdin(Stdio::piped())
-		.stdout(Stdio::piped())
-		.spawn()
-		.expect("failed to start rls process")
+    use std::env;
+    let rls_root = env::var("RLS_ROOT").expect("$RLS_ROOT must be set");
+        Command::new("cargo")
+            .current_dir(rls_root)
+            .args(&["run", "--release"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to start rls")
 }

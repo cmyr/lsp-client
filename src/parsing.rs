@@ -21,7 +21,7 @@ macro_rules! print_err {
 
 #[derive(Debug)]
 /// An Error type encapsulating the various failure possibilites of the parsing process.
-enum ParseError {
+pub enum ParseError {
     Io(io::Error),
     ParseInt(std::num::ParseIntError),
     Utf8(std::string::FromUtf8Error),
@@ -68,12 +68,13 @@ enum LspHeader {
 
 /// Given a reference to a reader, attempts to read a Language Server Protocol message,
 /// blocking until a message is received.
-fn read_message<B: BufRead>(reader: &mut B) -> Result<Value, ParseError> {
+pub fn read_message<B: BufRead>(reader: &mut B) -> Result<Value, ParseError> {
     let mut buffer = String::new();
     let mut content_length: Option<usize> = None;
 
     // read in headers. 
     loop {
+            buffer.clear();
             reader.read_line(&mut buffer)?;
             match &buffer {
                 s if s.trim().len() == 0 => { break }, // empty line is end of headers
@@ -84,10 +85,9 @@ fn read_message<B: BufRead>(reader: &mut B) -> Result<Value, ParseError> {
                     };
                 }
             };
-            buffer.clear();
         }
     
-    let content_length = content_length.ok_or("missing Content-Length header".to_owned())?;
+    let content_length = content_length.ok_or(format!("missing content-length header: {}", buffer))?;
     // message body isn't newline terminated, so we read content_length bytes
     let mut body_buffer = vec![0; content_length];
     reader.read_exact(&mut body_buffer)?;
